@@ -1,7 +1,7 @@
 import cv2
 import mediapipe as mp
 import numpy as np
-import yaml
+import zmq
 
 
 class HandGestureDetector:
@@ -150,24 +150,6 @@ class HandGestureDetector:
 
         return None
 
-    def export_to_yaml(self):
-        if not self.angle_records:
-            print("没有要导出的数据")
-            return
-
-        action_sequence = {"action_sequence": []}
-        for angles in self.angle_records:
-            processed_angles = [min(angle, 180) for angle in angles]
-            joint_ids = list(range(1, len(processed_angles) + 1))
-            action_sequence["action_sequence"].append({
-                "joint_ids": joint_ids,
-                "angles": processed_angles
-            })
-
-        with open('action_sequence.yaml', 'w') as f:
-            yaml.dump(action_sequence, f, default_flow_style=False, sort_keys=False)
-        print("数据已导出到 action_sequence.yaml 文件")
-
     def detect(self):
         cap = cv2.VideoCapture(0)
         while True:
@@ -185,16 +167,11 @@ class HandGestureDetector:
             cv2.imshow('MediaPipe Hands (3D Angle)', frame)
             key = cv2.waitKey(1)
 
-            if key == 13 and angle_list is not None:  # 按回车记录角度
-                self.angle_records.append(angle_list)
-            elif key == 27:  # 按 ESC 退出
+            if key == 27:  # 按 ESC 退出
                 break
 
         cap.release()
         cv2.destroyAllWindows()
-
-        if self.angle_records:
-            self.export_to_yaml()
 
 
 if __name__ == '__main__':

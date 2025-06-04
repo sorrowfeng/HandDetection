@@ -85,7 +85,6 @@ env.bak/
 venv.bak/
 
 # IDE specific files
-.idea/
 .vscode/
 *.swp
 *.swo
@@ -105,3 +104,5 @@ Thumbs.db
 # Directories to ignore in git add . command (if any)
 .idea/
 .venv/
+build/
+dist/
