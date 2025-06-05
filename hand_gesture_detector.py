@@ -8,6 +8,19 @@ import os
 import sys
 import signal
 
+
+
+# 定义每根手指的三个关节点（CMC → MCP → PIP → DIP → TIP）
+FINGER_JOINTS = {
+    'thumb': [[0, 1, 2], [1, 2, 3], [2, 3, 4]],       # 拇指
+    'index': [[0, 5, 6], [5, 6, 7], [6, 7, 8]],       # 食指
+    'middle': [[0, 9, 10], [9, 10, 11], [10, 11, 12]],  # 中指
+    'ring': [[0, 13, 14], [13, 14, 15], [14, 15, 16]],  # 无名指
+    'pinky': [[0, 17, 18], [17, 18, 19], [18, 19, 20]]  # 小指
+}
+
+
+
 def resource_path(relative_path):
     """ 获取资源绝对路径，适用于 PyInstaller 打包后的环境 """
     try:
@@ -16,15 +29,33 @@ def resource_path(relative_path):
         base_path = os.path.abspath(".")
     return os.path.join(base_path, relative_path)
 
+
+def show_simple(frame, angles, font_scale=0.6, text_color=(0, 255, 0)):
+    """
+    最简实时显示函数：在图像上叠加角度文本并显示窗口
+    :param frame: 输入图像（BGR格式，已绘制关键点）
+    :param angles: 角度字典（如 {'thumb': [...], 'index': [...], ...}）
+    :param font_scale: 字体大小
+    :param text_color: 文本颜色（BGR格式）
+    """
+    # 复制图像避免修改原始数据
+    img = frame.copy()
+    
+    # 显示图像（窗口自动适应尺寸）
+    cv2.imshow("Hand Tracking", img)
+    cv2.waitKey(1)  # 实时刷新（1ms延迟）
+
+
+
 class HandGestureDetector:
     def __init__(self):
         self.running = True
+        self.show_window = False
         signal.signal(signal.SIGINT, self.exit_gracefully)
         signal.signal(signal.SIGTERM, self.exit_gracefully)
 
         # 设置 Mediapipe 自定义模型路径（打包后也能找到）
         mp_path = resource_path('mediapipe')
-
         os.environ['MEDIAPIPE_HOME'] = mp_path
 
         self.mp_drawing = mp.solutions.drawing_utils
@@ -45,10 +76,20 @@ class HandGestureDetector:
         self.socket.bind("tcp://*:5555")  # 监听端口 5555
         print("[INFO] ZMQ Publisher started on tcp://*:5555")
 
-
     def exit_gracefully(self, *args):
         print("[INFO] Exiting gracefully...")
         self.running = False
+
+    def set_show_window(self, show):
+        self.show_window = show
+
+    def calculate_angle_2d(self, a, b, c):
+        """
+        输入三个 2D 点 a(x,y), b(x,y), c(x,y)，计算 ∠abc 的角度（单位为度）
+        """
+        radians = np.arctan2(c[1] - b[1], c[0] - b[0]) - np.arctan2(a[1] - b[1], a[0] - b[0])
+        angle = np.abs(np.degrees(radians))
+        return min(angle, 360 - angle)  # 返回最小内角
 
     def calculate_angle_3d(self, a, b, c):
         """
@@ -61,62 +102,44 @@ class HandGestureDetector:
         ba_norm = ba / np.linalg.norm(ba) if np.linalg.norm(ba) != 0 else ba
         bc_norm = bc / np.linalg.norm(bc) if np.linalg.norm(bc) != 0 else bc
 
-        # 夹角（弧度）
         cosine_angle = np.dot(ba_norm, bc_norm)
         angle_rad = np.arccos(np.clip(cosine_angle, -1.0, 1.0))
         return np.degrees(angle_rad)
 
-    def get_finger_angles_3d(self, world_landmarks):
+    def get_finger_angles(self, points_list, calc_func, landmarks):
         """
-        输入一个手的 3D 关键点列表，返回每根手指各关节的弯曲角度
+        :param points_list: 关节点索引列表，如 [[0,1,2], [1,2,3]]
+        :param calc_func: calculate_angle_2d / calculate_angle_3d
+        :param landmarks: 实际点坐标列表，如 [(x,y), (x,y), ...]
+        :return: list of angles
         """
-        landmarks = [(lm.x, lm.y, lm.z) for lm in world_landmarks]
-
-        angles = {}
-
-        # thumb
-        angles['thumb'] = [
-            self.calculate_angle_3d(landmarks[0], landmarks[1], landmarks[2]),
-            self.calculate_angle_3d(landmarks[1], landmarks[2], landmarks[3]),
-            self.calculate_angle_3d(landmarks[2], landmarks[3], landmarks[4])
+        return [
+            calc_func(landmarks[i], landmarks[j], landmarks[k])
+            for i, j, k in points_list
         ]
 
-        # index
-        angles['index'] = [
-            self.calculate_angle_3d(landmarks[0], landmarks[5], landmarks[6]),
-            self.calculate_angle_3d(landmarks[5], landmarks[6], landmarks[7]),
-            self.calculate_angle_3d(landmarks[6], landmarks[7], landmarks[8])
-        ]
-
-        # middle
-        angles['middle'] = [
-            self.calculate_angle_3d(landmarks[0], landmarks[9], landmarks[10]),
-            self.calculate_angle_3d(landmarks[9], landmarks[10], landmarks[11]),
-            self.calculate_angle_3d(landmarks[10], landmarks[11], landmarks[12])
-        ]
-
-        # ring
-        angles['ring'] = [
-            self.calculate_angle_3d(landmarks[0], landmarks[13], landmarks[14]),
-            self.calculate_angle_3d(landmarks[13], landmarks[14], landmarks[15]),
-            self.calculate_angle_3d(landmarks[14], landmarks[15], landmarks[16])
-        ]
-
-        # pinky
-        angles['pinky'] = [
-            self.calculate_angle_3d(landmarks[0], landmarks[17], landmarks[18]),
-            self.calculate_angle_3d(landmarks[17], landmarks[18], landmarks[19]),
-            self.calculate_angle_3d(landmarks[18], landmarks[19], landmarks[20])
-        ]
-
-        converted_angles = {
-            finger: [180 - a for a in joint_angles]
-            for finger, joint_angles in angles.items()
+    def get_all_finger_angles(self, landmarks, use_2d=True):
+        """
+        获取所有手指的角度（每根手指 3 个角度）
+        :param landmarks: 手部关键点（2D 或 3D）
+        :param use_2d: 是否使用 2D 角度计算
+        :return: dict 包含每根手指的角度
+        """
+        calc_func = self.calculate_angle_2d if use_2d else self.calculate_angle_3d
+        raw_angles = {
+            finger: self.get_finger_angles(joints, calc_func, landmarks)
+            for finger, joints in FINGER_JOINTS.items()
+        }
+    
+        # 转换为“伸直=0，弯曲越大数值越大”
+        bend_angles = {
+            finger: [180 - round(angle, 1) for angle in angles]
+            for finger, angles in raw_angles.items()
         }
 
-        return converted_angles
-
-    def draw_landmarks_on_image(self, frame, hand_landmarks):
+        return bend_angles
+   
+    def draw_landmarks_on_image(self, frame, hand_landmarks, angles=None):
         """在图像上绘制手部关键点、连接线 和 编号"""
         frame_with_landmarks = frame.copy()
 
@@ -130,37 +153,51 @@ class HandGestureDetector:
         # 获取图像尺寸
         h, w, _ = frame_with_landmarks.shape
 
-        # --- 绘制编号（0~20）+ 白色描边 ---
-        for idx, landmark in enumerate(hand_landmarks.landmark):
-            x = int(landmark.x * w)
-            y = int(landmark.y * h)
+        if angles is not None:
+            for finger_name, joint_angles in angles.items():
+                joint_indices = FINGER_JOINTS[finger_name]
+                for i, indices in enumerate(joint_indices):
+                    if i >= len(joint_angles):
+                        continue
+                    try:
+                        a_idx, b_idx, c_idx = indices
+                        b = hand_landmarks.landmark[b_idx]
+                        x = int(b.x * w)
+                        y = int(b.y * h)
 
-            # 先画白色描边（较粗）
-            cv2.putText(
-                frame_with_landmarks, str(idx),
-                (x + 5, y + 5),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.4,
-                (255, 255, 255),  # 白色描边
-                2,  # 线条粗细
-                cv2.LINE_AA
-            )
+                        angle = round(joint_angles[i], 1)
 
-            # 再画内部红色数字（稍细）
-            cv2.putText(
-                frame_with_landmarks, str(idx),
-                (x + 5, y + 5),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.4,
-                (0, 0, 255),  # 红色字体
-                1,
-                cv2.LINE_AA
-            )
+                        # 调整字体大小为 0.4（原为 0.5）
+                        font_scale = 0.4
+                        thickness = 1
+
+                         # 白色描边 + 黄色字体（更清晰）
+                        cv2.putText(frame_with_landmarks, f"{angle}",
+                                    (x + 8, y - 8),
+                                    cv2.FONT_HERSHEY_SIMPLEX,
+                                    font_scale,
+                                    (255, 255, 255),  # 白色描边
+                                    thickness + 1,
+                                    cv2.LINE_AA)
+
+                        cv2.putText(frame_with_landmarks, f"{angle}",
+                                    (x + 8, y - 8),
+                                    cv2.FONT_HERSHEY_SIMPLEX,
+                                    font_scale,
+                                    (0, 255, 255),  # 黄色字体
+                                    thickness,
+                                    cv2.LINE_AA)
+                    except Exception as e:
+                        print(f"[ERROR] Drawing angle failed for {finger_name} joint {i}: {e}")
+
 
         return frame_with_landmarks
 
+    
+
     def process_frame(self, frame, results):
-        data_list = []
+        angles = []
+        annotated_image = frame
 
         if results.multi_hand_landmarks and results.multi_hand_world_landmarks:
             for idx, (hand_landmarks, hand_world_landmarks, handedness) in enumerate(
@@ -168,17 +205,18 @@ class HandGestureDetector:
                         results.multi_hand_world_landmarks,
                         results.multi_handedness)):
 
-                # 获取世界坐标
-                landmarks_3d = [{
-                    "x": lm.x,
-                    "y": lm.y,
-                    "z": lm.z
-                } for lm in hand_world_landmarks.landmark]
+                use_2d = False  # 可切换为 False 使用 3D
 
-                # 获取角度
-                angles = self.get_finger_angles_3d(hand_world_landmarks.landmark)
+                if use_2d:
+                    landmarks_2d = [(lm.x, lm.y) for lm in hand_landmarks.landmark]
+                    angles = self.get_all_finger_angles(landmarks_2d, use_2d=True)
+                else:
+                    landmarks_3d = [(lm.x, lm.y, lm.z) for lm in hand_world_landmarks.landmark]
+                    angles = self.get_all_finger_angles(landmarks_3d, use_2d=False)
 
-                # print(angles)  # 应该是 {'thumb': [...], ...}
+
+                # 绘制图像
+                annotated_image = self.draw_landmarks_on_image(frame, hand_landmarks, angles)
 
                 # 获取左右手信息
                 hand_label = handedness.classification[0].label
@@ -188,13 +226,9 @@ class HandGestureDetector:
                     "timestamp": datetime.now().isoformat(),
                     "hand_index": idx,
                     "hand_label": hand_label,
-                    "landmarks_3d": landmarks_3d,
                     "angles": angles
                 }
 
-
-                # 绘制图像
-                annotated_image = self.draw_landmarks_on_image(frame, hand_landmarks)
 
                 # 编码图像
                 _, jpeg = cv2.imencode('.jpg', annotated_image)
@@ -205,15 +239,13 @@ class HandGestureDetector:
                     jpeg.tobytes()
                 ])
 
-                data_list.append(metadata)
         else:
             # 没有检测到手时，发送空的数据和原图
             metadata = {
                 "timestamp": datetime.now().isoformat(),
                 "hand_index": None,
                 "hand_label": None,
-                "landmarks_3d": [],
-                "angles": {}
+                "angles": angles
             }
 
             # 使用原始帧图像（未标注）
@@ -225,9 +257,10 @@ class HandGestureDetector:
                 jpeg.tobytes()
             ])
 
-            data_list.append(metadata)
+        # 调用显示函数（传入带关键点的图像和角度数据）
+        if self.show_window:
+            show_simple(annotated_image, angles)
 
-        return data_list
 
     def run(self, camera_index=0):
         cap = cv2.VideoCapture(camera_index)
@@ -236,6 +269,7 @@ class HandGestureDetector:
             return
 
         print(f"[INFO] Using camera index: {camera_index}")
+        print("[INFO] hand gesure detector is running")
         try:
             while self.running:
                 ret, frame = cap.read()
@@ -260,4 +294,5 @@ class HandGestureDetector:
 
 if __name__ == '__main__':
     detector = HandGestureDetector()
+    detector.set_show_window(True)
     detector.run(camera_index=0)
