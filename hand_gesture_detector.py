@@ -57,6 +57,10 @@ class HandGestureDetector:
         self.smoothing_factor = 0.3  # 平滑系数（0.1~0.5，越小越平滑）
         self.previous_landmarks = None  # 存储上一帧的关键点数据
 
+        # 初始化OpenCV卡尔曼滤波器
+        self.kalman_filters = {}
+        self.initialize_opencv_kalman_filters()
+
         # 设置 Mediapipe 自定义模型路径（打包后也能找到）
         mp_path = resource_path('mediapipe')
         os.environ['MEDIAPIPE_HOME'] = mp_path
@@ -197,7 +201,7 @@ class HandGestureDetector:
         return frame_with_landmarks
 
 
-    def exponential_smoothing(self, current_landmarks):
+    def apply_exponential_smoothing(self, current_landmarks):
         """指数平滑滤波函数"""
         if self.previous_landmarks is None:
             self.previous_landmarks = current_landmarks
@@ -209,6 +213,49 @@ class HandGestureDetector:
             (1 - self.smoothing_factor) * self.previous_landmarks
         )
         self.previous_landmarks = smoothed_landmarks
+        return smoothed_landmarks
+
+
+    def initialize_opencv_kalman_filters(self):
+        """使用OpenCV的卡尔曼滤波器实现"""
+        for i in range(21):
+            # X坐标滤波器
+            kf_x = cv2.KalmanFilter(2, 1)  # 2状态变量，1测量值
+            kf_x.transitionMatrix = np.array([[1, 1], [0, 1]], dtype=np.float32)
+            kf_x.measurementMatrix = np.array([[1, 0]], dtype=np.float32)
+            kf_x.processNoiseCov = np.eye(2, dtype=np.float32) * 0.1
+            kf_x.measurementNoiseCov = np.array([[1]], dtype=np.float32)
+            kf_x.statePost = np.array([[0], [0]], dtype=np.float32)  # 初始状态
+            
+            # Y坐标滤波器
+            kf_y = cv2.KalmanFilter(2, 1)
+            kf_y.transitionMatrix = np.array([[1, 1], [0, 1]], dtype=np.float32)
+            kf_y.measurementMatrix = np.array([[1, 0]], dtype=np.float32)
+            kf_y.processNoiseCov = np.eye(2, dtype=np.float32) * 0.1
+            kf_y.measurementNoiseCov = np.array([[1]], dtype=np.float32)
+            kf_y.statePost = np.array([[0], [0]], dtype=np.float32)
+            
+            self.kalman_filters[f'x_{i}'] = kf_x
+            self.kalman_filters[f'y_{i}'] = kf_y
+
+
+    def apply_kalman_filter(self, landmarks):
+        """应用OpenCV卡尔曼滤波"""
+        smoothed_landmarks = np.zeros_like(landmarks)
+        
+        for i in range(len(landmarks)):
+            x, y = landmarks[i]
+            
+            # 预测
+            self.kalman_filters[f'x_{i}'].predict()
+            self.kalman_filters[f'y_{i}'].predict()
+            
+            # 更新
+            smoothed_x = self.kalman_filters[f'x_{i}'].correct(np.array([[x]], dtype=np.float32))
+            smoothed_y = self.kalman_filters[f'y_{i}'].correct(np.array([[y]], dtype=np.float32))
+            
+            smoothed_landmarks[i] = [smoothed_x[0][0], smoothed_y[0][0]]
+            
         return smoothed_landmarks
     
 
@@ -226,7 +273,7 @@ class HandGestureDetector:
                 current_landmarks = np.array([[lm.x, lm.y] for lm in hand_landmarks.landmark])
                 
                 # 应用指数平滑滤波
-                smoothed_landmarks = self.exponential_smoothing(current_landmarks)
+                smoothed_landmarks = self.apply_exponential_smoothing(current_landmarks)
                 
                 # 更新手部关键点数据（使用平滑后的坐标）
                 for i, lm in enumerate(hand_landmarks.landmark):
