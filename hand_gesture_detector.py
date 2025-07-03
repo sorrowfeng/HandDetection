@@ -20,7 +20,6 @@ FINGER_JOINTS = {
 }
 
 
-
 def resource_path(relative_path):
     """ 获取资源绝对路径，适用于 PyInstaller 打包后的环境 """
     try:
@@ -54,6 +53,10 @@ class HandGestureDetector:
         signal.signal(signal.SIGINT, self.exit_gracefully)
         signal.signal(signal.SIGTERM, self.exit_gracefully)
 
+        # 初始化平滑滤波参数
+        self.smoothing_factor = 0.3  # 平滑系数（0.1~0.5，越小越平滑）
+        self.previous_landmarks = None  # 存储上一帧的关键点数据
+
         # 设置 Mediapipe 自定义模型路径（打包后也能找到）
         mp_path = resource_path('mediapipe')
         os.environ['MEDIAPIPE_HOME'] = mp_path
@@ -65,9 +68,9 @@ class HandGestureDetector:
         self.hands = self.mp_hands.Hands(
             static_image_mode=False,
             max_num_hands=1,
-            model_complexity=1,
-            min_detection_confidence=0.75,
-            min_tracking_confidence=0.75
+            model_complexity=0,
+            min_detection_confidence=0.8,
+            min_tracking_confidence=0.8
         )
 
         # ZeroMQ 设置
@@ -193,6 +196,20 @@ class HandGestureDetector:
 
         return frame_with_landmarks
 
+
+    def exponential_smoothing(self, current_landmarks):
+        """指数平滑滤波函数"""
+        if self.previous_landmarks is None:
+            self.previous_landmarks = current_landmarks
+            return current_landmarks
+        
+        # 计算平滑后的关键点
+        smoothed_landmarks = (
+            self.smoothing_factor * current_landmarks +
+            (1 - self.smoothing_factor) * self.previous_landmarks
+        )
+        self.previous_landmarks = smoothed_landmarks
+        return smoothed_landmarks
     
 
     def process_frame(self, frame, results):
@@ -205,7 +222,18 @@ class HandGestureDetector:
                         results.multi_hand_world_landmarks,
                         results.multi_handedness)):
 
-                use_2d = False  # 可切换为 False 使用 3D
+                # 提取当前帧的关键点坐标（21个点，每个点有x, y）
+                current_landmarks = np.array([[lm.x, lm.y] for lm in hand_landmarks.landmark])
+                
+                # 应用指数平滑滤波
+                smoothed_landmarks = self.exponential_smoothing(current_landmarks)
+                
+                # 更新手部关键点数据（使用平滑后的坐标）
+                for i, lm in enumerate(hand_landmarks.landmark):
+                    lm.x, lm.y = smoothed_landmarks[i]
+                    
+
+                use_2d = True  # 可切换使用 3D
 
                 if use_2d:
                     landmarks_2d = [(lm.x, lm.y) for lm in hand_landmarks.landmark]
